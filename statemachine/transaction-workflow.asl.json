@@ -1,0 +1,86 @@
+{
+  "Comment": "Banking Transaction Workflow",
+  "StartAt": "ValidateTransaction",
+
+  "States": {
+
+    "ValidateTransaction": {
+
+      "Type": "Task",
+      "Resource": "${ValidationLambdaArn}",
+
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "FailureHandler"
+        }
+      ],
+
+      "Next": "FraudCheck"
+    },
+
+    "FraudCheck": {
+
+      "Type": "Task",
+      "Resource": "${FraudLambdaArn}",
+
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "FailureHandler"
+        }
+      ],
+
+      "Next": "ProcessTransaction"
+    },
+
+    "ProcessTransaction": {
+
+      "Type": "Task",
+      "Resource": "${ProcessorLambdaArn}",
+
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "FailureHandler"
+        }
+      ],
+
+      "End": true
+    },
+
+    "FailureHandler": {
+
+      "Type": "Task",
+      "Resource": "${FailureLambdaArn}",
+      "End": true
+    }
+  }
+}

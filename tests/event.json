@@ -1,0 +1,3 @@
+{
+  "body": "{\"transaction_id\":\"TXN100005\",\"customer_id\":\"C1002\",\"account_number\":\"123456789013\",\"transaction_type\":\"DEBIT\",\"amount\":1000,\"currency\":\"INR\",\"merchant\":\"Amazon\",\"channel\":\"UPI\",\"timestamp\":\"2026-06-21T13:00:00Z\"}"
+}

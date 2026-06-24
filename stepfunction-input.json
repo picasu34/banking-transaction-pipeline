@@ -1,0 +1,13 @@
+{
+  "transaction_id": "TXN998889",
+  "customer_id": "C9989",
+  "customer_name": "Step Function User9",
+  "account_number": "123488889889",
+  "transaction_type": "DEBIT",
+  "amount": "75000",
+  "currency": "INR",
+  "merchant": "Amazon",
+  "channel": "UPI",
+  "branch": "Mumbai",
+  "timestamp": "2026-06-24T16:20:00Z"
+}

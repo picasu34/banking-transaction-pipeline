@@ -1,0 +1,501 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: Banking Transaction Pipeline
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 30
+    MemorySize: 256
+
+Resources:
+
+  #########################################################
+  # DynamoDB Table
+  #########################################################
+
+  BankTransactionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: BankTransactions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: transaction_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: transaction_id
+          KeyType: HASH
+
+  #########################################################
+  # SNS Topic
+  #########################################################
+
+  TransactionNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: bank-transaction-notifications
+
+
+  #########################################################
+  # Dead Letter Queue
+  #########################################################
+
+  TransactionDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: bank-transactions-dlq.fifo
+      FifoQueue: true
+      ContentBasedDeduplication: true
+
+  #########################################################
+  # SQS Queue
+  #########################################################
+
+  TransactionQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: bank-transactions.fifo
+      FifoQueue: true
+      ContentBasedDeduplication: true
+
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt TransactionDLQ.Arn
+        maxReceiveCount: 3
+
+  #########################################################
+  # Validation Lambda
+  #########################################################
+
+  ValidationFunction:
+    Type: AWS::Serverless::Function
+
+    Properties:
+
+      FunctionName: ValidationLambda
+
+      Tracing: Active
+
+      CodeUri: src/
+
+      Handler: lambdas.validation.app.lambda_handler
+
+      Policies:
+        - AWSLambdaBasicExecutionRole
+
+        - AWSXRayDaemonWriteAccess
+
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt TransactionQueue.QueueName
+
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref TransactionQueue
+
+      Events:
+        ValidateTransaction:
+          Type: Api
+          Properties:
+            Path: /validate
+            Method: POST
+
+  #########################################################
+  # Processor Lambda
+  #########################################################
+
+  ProcessorFunction:
+    Type: AWS::Serverless::Function
+
+    Properties:
+
+      FunctionName: ProcessorLambda
+
+      Tracing: Active
+
+      CodeUri: src/
+
+      Handler: lambdas.processor.app.lambda_handler
+
+      Policies:
+
+        - AWSLambdaBasicExecutionRole
+
+        - AWSXRayDaemonWriteAccess
+
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BankTransactionsTable
+
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt TransactionNotificationTopic.TopicName
+
+        - Statement:
+            - Effect: Allow
+              Action:
+                - events:PutEvents
+              Resource: !GetAtt TransactionEventBus.Arn
+              
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: "*"
+
+        - S3CrudPolicy:
+              BucketName: !Ref TransactionArchiveBucket
+
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref TransactionNotificationTopic
+          TABLE_NAME: !Ref BankTransactionsTable
+          EVENT_BUS_NAME: !Ref TransactionEventBus
+          ARCHIVE_BUCKET: !Ref TransactionArchiveBucket
+
+      Events:
+
+        SQSTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt TransactionQueue.Arn
+            BatchSize: 1
+
+
+  #########################################################
+  # Fraud Lambda
+  #########################################################
+
+  FraudFunction:
+    Type: AWS::Serverless::Function
+
+    Properties:
+      FunctionName: FraudLambda
+
+      Tracing: Active
+
+      CodeUri: src/
+
+      Handler: lambdas.fraud.app.lambda_handler
+
+      MemorySize: 256
+
+      Timeout: 30
+
+      Policies:
+        - AWSLambdaBasicExecutionRole
+
+        - AWSXRayDaemonWriteAccess
+
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: "*"
+
+
+
+        
+#########################################################
+# API Lambda
+#########################################################
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+
+    Properties:
+
+      FunctionName: ApiLambda
+
+      Tracing: Active
+
+      CodeUri: src/
+
+      Handler: lambdas.api.app.lambda_handler
+
+      Runtime: python3.13
+
+      Policies:
+
+        - AWSLambdaBasicExecutionRole
+
+        - AWSXRayDaemonWriteAccess
+
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt TransactionQueue.QueueName
+
+      Environment:
+
+        Variables:
+
+          QUEUE_URL: !Ref TransactionQueue
+
+      Events:
+
+        TransactionAPI:
+
+          Type: Api
+
+          Properties:
+
+            Path: /transactions
+
+            Method: post
+
+            
+
+  #########################################################
+  # CloudWatch Alarm - Processor Lambda Errors
+  #########################################################
+
+  ProcessorLambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+
+    Properties:
+      AlarmName: ProcessorLambdaErrors
+
+      AlarmDescription: Alarm when Processor Lambda has errors
+
+      Namespace: AWS/Lambda
+
+      MetricName: Errors
+
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ProcessorFunction
+
+      Statistic: Sum
+
+      Period: 60
+
+      EvaluationPeriods: 1
+
+      Threshold: 1
+
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+
+      TreatMissingData: notBreaching
+
+      AlarmActions:
+        - !Ref TransactionNotificationTopic
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchRole.Arn
+
+  ApiGatewayCloudWatchRole:
+    Type: AWS::IAM::Role
+
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+#########################################################
+# EventBridge Bus
+#########################################################
+
+  TransactionEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: BankingTransactionBus
+
+
+####################################################
+#Event rule
+###################################################
+
+  TransactionProcessedRule:
+    Type: AWS::Events::Rule
+
+    Properties:
+
+      EventBusName: !Ref TransactionEventBus
+
+      EventPattern:
+
+        source:
+          - bank.transaction
+
+        detail-type:
+          - TransactionProcessed
+
+      Targets:
+
+        - Arn: !GetAtt AuditFunction.Arn
+          Id: AuditLambdaTarget
+
+#################################################
+#Event Bridge permission to invoke Lambda 
+#################################################
+
+  AuditLambdaPermission:
+    Type: AWS::Lambda::Permission
+
+    Properties:
+
+      Action: lambda:InvokeFunction
+
+      FunctionName: !Ref AuditFunction
+
+      Principal: events.amazonaws.com
+
+      SourceArn: !GetAtt TransactionProcessedRule.Arn
+
+
+########################################################
+#Audit lambda
+########################################################
+
+  AuditFunction:
+    Type: AWS::Serverless::Function
+
+    Properties:
+
+      FunctionName: AuditLambda
+
+      CodeUri: src/
+
+      Handler: lambdas.audit.app.lambda_handler
+
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - AWSXRayDaemonWriteAccess
+
+  #########################################################
+  # Step Functions Workflow
+  #########################################################
+
+  TransactionWorkflow:
+    Type: AWS::Serverless::StateMachine
+
+    Properties:
+
+      Name: BankingTransactionWorkflow
+
+      DefinitionUri: statemachine/transaction-workflow.asl.json
+
+      DefinitionSubstitutions:
+
+        ValidationLambdaArn: !GetAtt ValidationFunction.Arn
+        FraudLambdaArn: !GetAtt FraudFunction.Arn
+        ProcessorLambdaArn: !GetAtt ProcessorFunction.Arn
+        FailureLambdaArn: !GetAtt FailureFunction.Arn
+
+      Policies:
+
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ValidationFunction
+
+        - LambdaInvokePolicy:
+            FunctionName: !Ref FraudFunction
+
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ProcessorFunction
+
+        - LambdaInvokePolicy:
+            FunctionName: !Ref FailureFunction
+
+  #########################################################
+  # Failure Lambda
+  #########################################################
+
+  FailureFunction:
+    Type: AWS::Serverless::Function
+
+    Properties:
+
+      FunctionName: FailureLambda
+
+      CodeUri: src/
+
+      Handler: lambdas.failure.app.lambda_handler
+
+      Policies:
+
+        - AWSLambdaBasicExecutionRole
+
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt TransactionNotificationTopic.TopicName
+
+      Environment:
+
+        Variables:
+
+          TOPIC_ARN: !Ref TransactionNotificationTopic
+
+
+##############################################################
+#S3 Bucket
+#############################################################        
+
+  TransactionArchiveBucket:
+    Type: AWS::S3::Bucket
+
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-transaction-archive"
+
+
+Outputs:
+
+  ValidationApiEndpoint:
+    Description: Validation API
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/validate"
+
+  TransactionApiEndpoint:
+    Description: Transaction API
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/transactions"
+
+  QueueUrl:
+    Value: !Ref TransactionQueue
+
+  QueueArn:
+    Value: !GetAtt TransactionQueue.Arn
+
+  TopicArn:
+    Value: !Ref TransactionNotificationTopic
+
+  DynamoDBTable:
+    Value: !Ref BankTransactionsTable
+
+  ValidationLambdaArn:
+    Value: !GetAtt ValidationFunction.Arn
+
+  ProcessorLambdaArn:
+    Value: !GetAtt ProcessorFunction.Arn
+  
+  FraudLambdaArn:
+    Description: Fraud Lambda ARN
+    Value: !GetAtt FraudFunction.Arn
+
+  DLQUrl:
+    Description: Dead Letter Queue URL
+    Value: !Ref TransactionDLQ
+
+  DLQArn:
+    Description: Dead Letter Queue ARN
+    Value: !GetAtt TransactionDLQ.Arn
+
+  ProcessorLambdaAlarm:
+    Description: CloudWatch Alarm
+    Value: !Ref ProcessorLambdaErrorAlarm
+
+  EventBusArn:
+    Description: EventBridge Bus ARN
+    Value: !GetAtt TransactionEventBus.Arn
+
+  AuditLambdaArn:
+    Description: Audit Lambda ARN
+    Value: !GetAtt AuditFunction.Arn
+
+  StepFunctionArn:
+    Description: Step Function ARN
+    Value: !Ref TransactionWorkflow

@@ -1,0 +1,32 @@
+# AWS SDK
+boto3
+botocore
+
+# Database
+psycopg2-binary
+
+# REST API
+requests
+
+# Environment Variables
+python-dotenv
+
+# Validation
+pydantic
+
+# Data Processing
+pandas
+numpy
+
+# AWS Lambda
+aws-lambda-powertools
+
+# Testing
+pytest
+pytest-cov
+
+# Logging
+structlog
+
+# YAML
+PyYAML
