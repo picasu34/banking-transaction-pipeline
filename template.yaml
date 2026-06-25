@@ -9,6 +9,23 @@ Globals:
     Timeout: 30
     MemorySize: 256
 
+Parameters:
+
+  Environment:
+    Type: String
+    AllowedValues:
+      - dev
+      - prod
+    Default: dev
+
+  ProjectName:
+    Type: String
+    Default: banking-pipeline
+  
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+
 Resources:
 
   #########################################################
@@ -17,15 +34,39 @@ Resources:
 
   BankTransactionsTable:
     Type: AWS::DynamoDB::Table
+
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
     Properties:
-      TableName: BankTransactions
+
+      TableName: !Sub "${ProjectName}-${Environment}-transactions"
+
       BillingMode: PAY_PER_REQUEST
+
       AttributeDefinitions:
         - AttributeName: transaction_id
           AttributeType: S
+
       KeySchema:
         - AttributeName: transaction_id
           KeyType: HASH
+
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+
+      SSESpecification:
+        SSEEnabled: true
+
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+        - Key: Project
+          Value: Banking Pipeline
+
+        - Key: Owner
+          Value: Kumar Nitin
 
   #########################################################
   # SNS Topic
@@ -33,8 +74,19 @@ Resources:
 
   TransactionNotificationTopic:
     Type: AWS::SNS::Topic
+
     Properties:
-      TopicName: bank-transaction-notifications
+
+      TopicName: !Sub "${ProjectName}-${Environment}-alerts"
+
+      KmsMasterKeyId: alias/aws/sns
+
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+        - Key: Project
+          Value: Banking Pipeline
 
 
   #########################################################
@@ -44,9 +96,17 @@ Resources:
   TransactionDLQ:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: bank-transactions-dlq.fifo
+      QueueName: !Sub "${ProjectName}-${Environment}-dlq.fifo"
       FifoQueue: true
       ContentBasedDeduplication: true
+      SqsManagedSseEnabled: true
+
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+        - Key: Project
+          Value: Banking Pipeline
 
   #########################################################
   # SQS Queue
@@ -55,13 +115,79 @@ Resources:
   TransactionQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: bank-transactions.fifo
+      QueueName: !Sub "${ProjectName}-${Environment}.fifo"
       FifoQueue: true
       ContentBasedDeduplication: true
+      SqsManagedSseEnabled: true
 
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt TransactionDLQ.Arn
         maxReceiveCount: 3
+
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+        - Key: Project
+          Value: Banking Pipeline
+
+
+#########################################################
+# API Gateway
+#########################################################
+
+  TransactionApi:
+    Type: AWS::Serverless::Api
+
+    Properties:
+
+      Name: !Sub "${ProjectName}-${Environment}-api"
+
+      StageName: !Ref Environment
+
+      EndpointConfiguration: REGIONAL
+
+      TracingEnabled: true
+
+
+      Cors:
+
+        AllowMethods: "'GET,POST,OPTIONS'"
+
+        AllowHeaders: "'Content-Type,Authorization'"
+
+        AllowOrigin: "'*'"
+
+      MethodSettings:
+
+        - HttpMethod: "*"
+
+          ResourcePath: "/*"
+
+          MetricsEnabled: true
+
+          LoggingLevel: INFO
+
+          DataTraceEnabled: false
+
+          ThrottlingBurstLimit: 100
+
+          ThrottlingRateLimit: 50
+
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiGatewayLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","caller":"$context.identity.caller","user":"$context.identity.user","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","resourcePath":"$context.resourcePath","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength","integrationError":"$context.integration.error"}'
+
+      Variables:
+
+        Environment: !Ref Environment
+
+      Tags:
+
+        Environment: !Ref Environment
+
+        Project: BankingPipeline
+
 
   #########################################################
   # Validation Lambda
@@ -72,7 +198,7 @@ Resources:
 
     Properties:
 
-      FunctionName: ValidationLambda
+      FunctionName: !Sub "${ProjectName}-${Environment}-validation"
 
       Tracing: Active
 
@@ -91,13 +217,29 @@ Resources:
       Environment:
         Variables:
           QUEUE_URL: !Ref TransactionQueue
+          ENVIRONMENT: !Ref Environment
 
       Events:
         ValidateTransaction:
           Type: Api
           Properties:
+            RestApiId: !Ref TransactionApi
             Path: /validate
             Method: POST
+
+
+#########################################################
+# Validation Lambda Log Group
+#########################################################
+
+  ValidationLogGroup:
+    Type: AWS::Logs::LogGroup
+
+    Properties:
+
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-${Environment}-validation"
+
+      RetentionInDays: !Ref LogRetentionDays
 
   #########################################################
   # Processor Lambda
@@ -108,7 +250,7 @@ Resources:
 
     Properties:
 
-      FunctionName: ProcessorLambda
+      FunctionName: !Sub "${ProjectName}-${Environment}-processor"
 
       Tracing: Active
 
@@ -149,6 +291,7 @@ Resources:
           TABLE_NAME: !Ref BankTransactionsTable
           EVENT_BUS_NAME: !Ref TransactionEventBus
           ARCHIVE_BUCKET: !Ref TransactionArchiveBucket
+          ENVIRONMENT: !Ref Environment
 
       Events:
 
@@ -157,6 +300,19 @@ Resources:
           Properties:
             Queue: !GetAtt TransactionQueue.Arn
             BatchSize: 1
+
+########################################################
+# Processor Lambda Log Group Retention
+#######################################################
+
+  ProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+
+    Properties:
+
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-${Environment}-processor"
+
+      RetentionInDays: !Ref LogRetentionDays
 
 
   #########################################################
@@ -167,7 +323,7 @@ Resources:
     Type: AWS::Serverless::Function
 
     Properties:
-      FunctionName: FraudLambda
+      FunctionName: !Sub "${ProjectName}-${Environment}-fraud"
 
       Tracing: Active
 
@@ -189,8 +345,23 @@ Resources:
               Action:
                 - secretsmanager:GetSecretValue
               Resource: "*"
+      
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
 
+##################################################################
+# Fraud Lamda log Group
+#################################################################
 
+  FraudLogGroup:
+    Type: AWS::Logs::LogGroup
+
+    Properties:
+
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-${Environment}-fraud"
+
+      RetentionInDays: !Ref LogRetentionDays
 
         
 #########################################################
@@ -202,7 +373,7 @@ Resources:
 
     Properties:
 
-      FunctionName: ApiLambda
+      FunctionName: !Sub "${ProjectName}-${Environment}-api"
 
       Tracing: Active
 
@@ -226,6 +397,7 @@ Resources:
         Variables:
 
           QUEUE_URL: !Ref TransactionQueue
+          ENVIRONMENT: !Ref Environment
 
       Events:
 
@@ -234,11 +406,25 @@ Resources:
           Type: Api
 
           Properties:
+            
+            RestApiId: !Ref TransactionApi
 
             Path: /transactions
 
-            Method: post
+            Method: POST
 
+###############################################################
+# Api Lambda Log Group
+###############################################################
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+
+    Properties:
+
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-${Environment}-api"
+
+      RetentionInDays: !Ref LogRetentionDays
             
 
   #########################################################
@@ -249,7 +435,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
 
     Properties:
-      AlarmName: ProcessorLambdaErrors
+      AlarmName: !Sub "${ProjectName}-${Environment}-processor-errors"
 
       AlarmDescription: Alarm when Processor Lambda has errors
 
@@ -306,7 +492,16 @@ Resources:
   TransactionEventBus:
     Type: AWS::Events::EventBus
     Properties:
-      Name: BankingTransactionBus
+
+      Name: !Sub "${ProjectName}-${Environment}-eventbus"
+
+      Tags:
+
+        - Key: Environment
+          Value: !Ref Environment
+
+        - Key: Project
+          Value: Banking Pipeline
 
 
 ####################################################
@@ -360,7 +555,7 @@ Resources:
 
     Properties:
 
-      FunctionName: AuditLambda
+      FunctionName: !Sub "${ProjectName}-${Environment}-audit"
 
       CodeUri: src/
 
@@ -369,6 +564,23 @@ Resources:
       Policies:
         - AWSLambdaBasicExecutionRole
         - AWSXRayDaemonWriteAccess
+      
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+
+##########################################################
+# Audit Lambda Log Group
+#########################################################
+
+  AuditLogGroup:
+    Type: AWS::Logs::LogGroup
+
+    Properties:
+
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-${Environment}-audit"
+
+      RetentionInDays: !Ref LogRetentionDays
 
   #########################################################
   # Step Functions Workflow
@@ -379,7 +591,7 @@ Resources:
 
     Properties:
 
-      Name: BankingTransactionWorkflow
+      Name: !Sub "${ProjectName}-${Environment}-workflow"
 
       DefinitionUri: statemachine/transaction-workflow.asl.json
 
@@ -413,7 +625,7 @@ Resources:
 
     Properties:
 
-      FunctionName: FailureLambda
+      FunctionName: !Sub "${ProjectName}-${Environment}-failure"
 
       CodeUri: src/
 
@@ -431,7 +643,20 @@ Resources:
         Variables:
 
           TOPIC_ARN: !Ref TransactionNotificationTopic
+          ENVIRONMENT: !Ref Environment
 
+########################################################
+# Failure Lamda Log Group
+#######################################################
+
+  FailureLogGroup:
+    Type: AWS::Logs::LogGroup
+
+    Properties:
+
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-${Environment}-failure"
+
+      RetentionInDays: !Ref LogRetentionDays
 
 ##############################################################
 #S3 Bucket
@@ -441,18 +666,60 @@ Resources:
     Type: AWS::S3::Bucket
 
     Properties:
-      BucketName: !Sub "${AWS::StackName}-transaction-archive"
+
+      BucketName: !Sub "${ProjectName}-${Environment}-archive-${AWS::AccountId}"
+
+      VersioningConfiguration:
+        Status: Enabled
+
+      BucketEncryption:
+
+        ServerSideEncryptionConfiguration:
+
+          - ServerSideEncryptionByDefault:
+
+              SSEAlgorithm: AES256
+
+      PublicAccessBlockConfiguration:
+
+        BlockPublicAcls: true
+
+        IgnorePublicAcls: true
+
+        BlockPublicPolicy: true
+
+        RestrictPublicBuckets: true
+
+      Tags:
+
+        - Key: Environment
+          Value: !Ref Environment
+
+        - Key: Project
+          Value: Banking Pipeline
+#########################################################
+# API Gateway Access Logs
+#########################################################
+
+  ApiGatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+
+    Properties:
+
+      LogGroupName: !Sub "/aws/apigateway/${ProjectName}-${Environment}"
+
+      RetentionInDays: !Ref LogRetentionDays
 
 
 Outputs:
 
   ValidationApiEndpoint:
-    Description: Validation API
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/validate"
+    Description: Validation API Endpoint
+    Value: !Sub "https://${TransactionApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/validate"
 
   TransactionApiEndpoint:
-    Description: Transaction API
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/transactions"
+    Description: Transaction API Endpoint
+    Value: !Sub "https://${TransactionApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/transactions"
 
   QueueUrl:
     Value: !Ref TransactionQueue

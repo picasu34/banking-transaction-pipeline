@@ -1,17 +1,19 @@
 name: AWS SAM CI
 
 on:
-  push:
-    branches:
-      - main
-
   pull_request:
     branches:
       - main
+      - release
+
+  push:
+    branches:
+      - main
+      - release
 
 jobs:
 
-  build:
+  validate-build:
 
     runs-on: ubuntu-latest
 
@@ -25,14 +27,28 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install AWS SAM CLI
         uses: aws-actions/setup-sam@v2
 
-      - name: Verify SAM
+      - name: Verify SAM Installation
         run: sam --version
 
-      - name: Build Application
+      - name: Validate SAM Template
+        run: sam validate --lint
+
+      - name: Build SAM Application
         run: sam build
 
-      - name: Validate Template
-        run: sam validate
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sam-build
+          path: .aws-sam/build

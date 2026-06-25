@@ -1,12 +1,17 @@
 name: AWS SAM Deploy
 
 on:
-  push:
-    branches:
-      - main
+  workflow_run:
+    workflows: ["AWS SAM CI"]
+    types:
+      - completed
 
 jobs:
+
   deploy:
+
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
     runs-on: ubuntu-latest
 
     steps:
@@ -17,9 +22,9 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: "3.13"
 
-      - name: Setup AWS SAM
+      - name: Install AWS SAM CLI
         uses: aws-actions/setup-sam@v2
 
       - name: Configure AWS Credentials
@@ -29,16 +34,34 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: SAM Build
-        run: sam build
+      ###################################################
+      # Deploy DEV
+      ###################################################
 
-      - name: SAM Validate
-        run: sam validate
+      - name: Deploy DEV Stack
 
-      - name: SAM Deploy
+        if: ${{ github.event.workflow_run.head_branch == 'main' }}
+
         run: |
           sam deploy \
             --stack-name banking-pipeline-dev \
+            --parameter-overrides Environment=dev ProjectName=banking-pipeline \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset
+
+      ###################################################
+      # Deploy PROD
+      ###################################################
+
+      - name: Deploy PROD Stack
+
+        if: ${{ github.event.workflow_run.head_branch == 'release' }}
+
+        run: |
+          sam deploy \
+            --stack-name banking-pipeline-prod \
+            --parameter-overrides Environment=prod ProjectName=banking-pipeline \
             --capabilities CAPABILITY_IAM \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset
